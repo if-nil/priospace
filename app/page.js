@@ -69,46 +69,52 @@ export default function Home() {
       setTheme(savedTheme);
     }
 
-    const savedDailyTasks = localStorage.getItem("dailyTasks");
-    if (savedDailyTasks) {
-      const parsed = JSON.parse(savedDailyTasks);
-      // Convert date strings back to Date objects and ensure all fields exist
-      const converted = {};
-      Object.keys(parsed).forEach((dateKey) => {
-        converted[dateKey] = parsed[dateKey].map((task) => {
-          // Ensure subtasks are properly structured
-          const processedSubtasks = (task.subtasks || []).map((subtask) => ({
-            ...subtask,
-            createdAt: new Date(subtask.createdAt || task.createdAt),
-            focusTime: subtask.focusTime || 0,
-            timeSpent: subtask.timeSpent || 0,
-            completed: !!subtask.completed,
-            parentTaskId: task.id,
-            subtasks: [], // Subtasks don't have their own subtasks
-          }));
+    // Only load business data from localStorage when Supabase is not enabled
+    const supabaseConfig = getSupabaseConfig();
+    const supabaseEnabled = supabaseConfig.enabled && supabaseConfig.url && supabaseConfig.key;
 
-          return {
-            ...task,
-            createdAt: new Date(task.createdAt),
-            focusTime: task.focusTime || 0,
-            timeSpent: task.timeSpent || 0,
-            completed: !!task.completed,
-            subtasks: processedSubtasks,
-            subtasksExpanded: task.subtasksExpanded || false,
-          };
+    if (!supabaseEnabled) {
+      const savedDailyTasks = localStorage.getItem("dailyTasks");
+      if (savedDailyTasks) {
+        const parsed = JSON.parse(savedDailyTasks);
+        // Convert date strings back to Date objects and ensure all fields exist
+        const converted = {};
+        Object.keys(parsed).forEach((dateKey) => {
+          converted[dateKey] = parsed[dateKey].map((task) => {
+            // Ensure subtasks are properly structured
+            const processedSubtasks = (task.subtasks || []).map((subtask) => ({
+              ...subtask,
+              createdAt: new Date(subtask.createdAt || task.createdAt),
+              focusTime: subtask.focusTime || 0,
+              timeSpent: subtask.timeSpent || 0,
+              completed: !!subtask.completed,
+              parentTaskId: task.id,
+              subtasks: [], // Subtasks don't have their own subtasks
+            }));
+
+            return {
+              ...task,
+              createdAt: new Date(task.createdAt),
+              focusTime: task.focusTime || 0,
+              timeSpent: task.timeSpent || 0,
+              completed: !!task.completed,
+              subtasks: processedSubtasks,
+              subtasksExpanded: task.subtasksExpanded || false,
+            };
+          });
         });
-      });
-      setDailyTasks(converted);
-    }
+        setDailyTasks(converted);
+      }
 
-    const savedCustomTags = localStorage.getItem("customTags");
-    if (savedCustomTags) {
-      setCustomTags(JSON.parse(savedCustomTags));
-    }
+      const savedCustomTags = localStorage.getItem("customTags");
+      if (savedCustomTags) {
+        setCustomTags(JSON.parse(savedCustomTags));
+      }
 
-    const savedHabits = localStorage.getItem("habits");
-    if (savedHabits) {
-      setHabits(JSON.parse(savedHabits));
+      const savedHabits = localStorage.getItem("habits");
+      if (savedHabits) {
+        setHabits(JSON.parse(savedHabits));
+      }
     }
   }, []);
 
@@ -221,16 +227,22 @@ export default function Home() {
   }, [theme]);
 
   useEffect(() => {
-    localStorage.setItem("dailyTasks", JSON.stringify(dailyTasks));
-  }, [dailyTasks]);
+    if (!getSupabase()) {
+      localStorage.setItem("dailyTasks", JSON.stringify(dailyTasks));
+    }
+  }, [dailyTasks, getSupabase]);
 
   useEffect(() => {
-    localStorage.setItem("customTags", JSON.stringify(customTags));
-  }, [customTags]);
+    if (!getSupabase()) {
+      localStorage.setItem("customTags", JSON.stringify(customTags));
+    }
+  }, [customTags, getSupabase]);
 
   useEffect(() => {
-    localStorage.setItem("habits", JSON.stringify(habits));
-  }, [habits]);
+    if (!getSupabase()) {
+      localStorage.setItem("habits", JSON.stringify(habits));
+    }
+  }, [habits, getSupabase]);
 
 
   const getDateString = (date) => {
