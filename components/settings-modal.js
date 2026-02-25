@@ -19,10 +19,15 @@ import {
   Save,
   Tag,
   AlertTriangle,
+  Cloud,
+  CloudOff,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useState, useRef } from "react";
+import { saveSupabaseConfig, getSupabaseConfig, clearSupabaseClient } from "@/lib/supabase";
 
 export function SettingsModal({
   onClose,
@@ -41,6 +46,76 @@ export function SettingsModal({
   const [editingTagId, setEditingTagId] = useState(null);
   const [editName, setEditName] = useState("");
   const modalRef = useRef(null);
+
+  const initialConfig = getSupabaseConfig();
+  const [supabaseUrl, setSupabaseUrl] = useState(initialConfig.url);
+  const [supabaseKey, setSupabaseKey] = useState(initialConfig.key);
+  const [supabaseEnabled, setSupabaseEnabled] = useState(initialConfig.enabled);
+  const [showKey, setShowKey] = useState(false);
+  const [supabaseExpanded, setSupabaseExpanded] = useState(initialConfig.enabled);
+  const [sqlCopied, setSqlCopied] = useState(false);
+
+  const SQL_CREATE_TABLE = `-- 任务表（含子任务，parent_task_id 非空为子任务）
+create table ps_tasks (
+  id text primary key,
+  date text not null,
+  title text not null,
+  completed boolean default false,
+  time_spent integer default 0,
+  focus_time integer default 0,
+  created_at timestamptz,
+  tag_id text,
+  parent_task_id text,
+  subtasks_expanded boolean default false,
+  is_deleted boolean default false,
+  updated_at timestamptz default now()
+);
+
+-- 习惯表
+create table ps_habits (
+  id text primary key,
+  name text not null,
+  tag_id text,
+  completed_dates jsonb default '[]',
+  is_deleted boolean default false,
+  updated_at timestamptz default now()
+);
+
+-- 标签表
+create table ps_tags (
+  id text primary key,
+  name text not null,
+  color text,
+  is_deleted boolean default false,
+  updated_at timestamptz default now()
+);
+
+-- RLS
+alter table ps_tasks enable row level security;
+alter table ps_habits enable row level security;
+alter table ps_tags enable row level security;
+
+create policy "allow all" on ps_tasks for all using (true) with check (true);
+create policy "allow all" on ps_habits for all using (true) with check (true);
+create policy "allow all" on ps_tags for all using (true) with check (true);`;
+
+  const handleCopySQL = () => {
+    navigator.clipboard.writeText(SQL_CREATE_TABLE).then(() => {
+      setSqlCopied(true);
+      setTimeout(() => setSqlCopied(false), 2000);
+    });
+  };
+
+  const handleSupabaseSave = () => {
+    clearSupabaseClient();
+    saveSupabaseConfig(supabaseUrl, supabaseKey, supabaseEnabled);
+  };
+
+  const handleToggleSupabase = (val) => {
+    setSupabaseEnabled(val);
+    clearSupabaseClient();
+    saveSupabaseConfig(supabaseUrl, supabaseKey, val);
+  };
 
   const startEditing = (tag) => {
     setEditingTagId(tag.id);
@@ -526,6 +601,119 @@ export function SettingsModal({
                       </div>
                     </div>
                   ))
+                )}
+              </div>
+            </motion.div>
+
+            {/* Supabase Sync */}
+            <motion.div variants={itemVariants}>
+              <div className={`rounded-xl border-2 overflow-hidden ${supabaseEnabled ? "border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/20" : "border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/80"}`}>
+                <div className="flex items-center justify-between p-4">
+                  <div className="flex items-center gap-3">
+                    {supabaseEnabled ? (
+                      <Cloud className="h-5 w-5 text-green-600 dark:text-green-400" />
+                    ) : (
+                      <CloudOff className="h-5 w-5 text-gray-400" />
+                    )}
+                    <div>
+                      <div className={`font-extrabold ${supabaseEnabled ? "text-green-700 dark:text-green-300" : "text-gray-900 dark:text-gray-100"}`}>
+                        Supabase 云同步
+                      </div>
+                      <div className={`text-sm font-medium ${supabaseEnabled ? "text-green-600 dark:text-green-400" : "text-gray-500 dark:text-gray-400"}`}>
+                        {supabaseEnabled ? "已启用，数据将同步到云端" : "配置后可跨设备同步数据"}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
+                      <Button
+                        onClick={() => setSupabaseExpanded(!supabaseExpanded)}
+                        variant="outline"
+                        size="sm"
+                        className="rounded-xl font-extrabold w-10 h-10 p-0 border-2"
+                      >
+                        <Settings className="h-4 w-4" />
+                      </Button>
+                    </motion.div>
+                  </div>
+                </div>
+
+                {supabaseExpanded && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="px-4 pb-4 space-y-3 border-t border-gray-200 dark:border-gray-700 pt-3"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-extrabold text-gray-700 dark:text-gray-300">启用 Supabase 同步</span>
+                      <button
+                        onClick={() => handleToggleSupabase(!supabaseEnabled)}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${supabaseEnabled ? "bg-green-500" : "bg-gray-300 dark:bg-gray-600"}`}
+                      >
+                        <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${supabaseEnabled ? "translate-x-6" : "translate-x-1"}`} />
+                      </button>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-xs font-extrabold text-gray-600 dark:text-gray-400 uppercase tracking-wider">
+                        Project URL
+                      </label>
+                      <Input
+                        value={supabaseUrl}
+                        onChange={(e) => setSupabaseUrl(e.target.value)}
+                        placeholder="https://xxxx.supabase.co"
+                        className="h-9 text-sm font-medium"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-xs font-extrabold text-gray-600 dark:text-gray-400 uppercase tracking-wider">
+                        Anon Key
+                      </label>
+                      <div className="relative">
+                        <Input
+                          value={supabaseKey}
+                          onChange={(e) => setSupabaseKey(e.target.value)}
+                          type={showKey ? "text" : "password"}
+                          placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                          className="h-9 text-sm font-medium pr-10"
+                        />
+                        <button
+                          onClick={() => setShowKey(!showKey)}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        >
+                          {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="text-xs text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded-lg p-2 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-extrabold">需要在 Supabase 中创建以下三张表：</span>
+                        <button
+                          onClick={handleCopySQL}
+                          className={`flex items-center gap-1 text-[10px] font-extrabold px-2 py-0.5 rounded-md transition-colors ${sqlCopied ? "text-green-600 bg-green-100 dark:bg-green-900/30" : "text-gray-500 hover:text-gray-700 hover:bg-gray-200 dark:hover:bg-gray-700"}`}
+                        >
+                          {sqlCopied ? <Check className="h-3 w-3" /> : <Download className="h-3 w-3" />}
+                          {sqlCopied ? "已复制" : "复制"}
+                        </button>
+                      </div>
+                      <code className="block text-[10px] leading-relaxed whitespace-pre-wrap break-all select-all cursor-text">
+{SQL_CREATE_TABLE}
+                      </code>
+                    </div>
+
+                    <Button
+                      onClick={handleSupabaseSave}
+                      size="sm"
+                      className="w-full rounded-xl font-extrabold"
+                    >
+                      <Save className="h-4 w-4 mr-2" />
+                      保存配置
+                    </Button>
+
+                  </motion.div>
                 )}
               </div>
             </motion.div>

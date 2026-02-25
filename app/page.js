@@ -1,12 +1,12 @@
 "use client";
 
 import { motion, AnimatePresence } from "framer-motion";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { DayNightCycle, AnimatedNumber } from "@/components/day-night-cycle";
 import { AnimatedYear } from "@/components/animated-year";
 import { WeeklyCalendar } from "@/components/weekly-calender";
 import { TaskList } from "@/components/task-list";
-import { Timer, Plus, BarChart3, Settings, CheckCircle } from "lucide-react";
+import { Timer, Plus, BarChart3, Settings, CheckCircle, Cloud } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AddTaskModal } from "@/components/add-task-modal";
 import { TaskOptionsModal } from "@/components/task-options-modal";
@@ -16,6 +16,19 @@ import { TimerModal } from "@/components/timer-modal";
 import { SettingsModal } from "@/components/settings-modal";
 import { IntroScreen } from "@/components/intro-screen";
 import { WebRTCShareModal } from "@/components/webrtc-share-modal";
+import {
+  createSupabaseClient,
+  getSupabaseConfig,
+  upsertTask,
+  softDeleteTask,
+  fetchTasksByDate,
+  upsertHabit,
+  softDeleteHabit,
+  fetchAllHabits,
+  upsertTag,
+  softDeleteTag,
+  fetchAllTags,
+} from "@/lib/supabase";
 
 export default function Home() {
   const [darkMode, setDarkMode] = useState(false);
@@ -34,6 +47,15 @@ export default function Home() {
   const [showIntroScreen, setShowIntroScreen] = useState(true);
   const [parentTaskForSubtask, setParentTaskForSubtask] = useState(null);
   const [showWebRTCShare, setShowWebRTCShare] = useState(false);
+  // 记录已从 Supabase 拉取过的日期，避免重复请求
+  const pulledDates = useRef(new Set());
+
+  // 获取 Supabase 客户端（如果未启用返回 null）
+  const getSupabase = useCallback(() => {
+    const config = getSupabaseConfig();
+    if (!config.enabled || !config.url || !config.key) return null;
+    return createSupabaseClient(config.url, config.key);
+  }, []);
 
   // Load data from localStorage on mount
   useEffect(() => {
@@ -209,6 +231,7 @@ export default function Home() {
   useEffect(() => {
     localStorage.setItem("habits", JSON.stringify(habits));
   }, [habits]);
+
 
   const getDateString = (date) => {
     const year = date.getFullYear();
@@ -613,9 +636,9 @@ export default function Home() {
     const dailyHabitTasks = generateDailyHabitTasks(habits, selectedDate);
     const allTasks = [...currentTasks, ...dailyHabitTasks];
     const task = findTaskById(id, allTasks);
+    const supabase = getSupabase();
 
     if (task?.isHabit && task.habitId) {
-      // Handle habit completion
       const updatedHabits = habits.map((habit) => {
         if (habit.id === task.habitId) {
           const completedDates = task.completed
@@ -626,14 +649,15 @@ export default function Home() {
         return habit;
       });
       setHabits(updatedHabits);
+      const updatedHabit = updatedHabits.find((h) => h.id === task.habitId);
+      if (supabase && updatedHabit) upsertHabit(supabase, updatedHabit).catch(console.error);
     } else {
-      // Handle regular task/subtask completion
-      const updatedTasks = updateTaskInList(
-        id,
-        { completed: !task.completed },
-        currentTasks
-      );
+      const newCompleted = !task.completed;
+      const updatedTasks = updateTaskInList(id, { completed: newCompleted }, currentTasks);
       setDailyTasks({ ...dailyTasks, [dateString]: updatedTasks });
+      if (supabase) {
+        upsertTask(supabase, { ...task, completed: newCompleted }, dateString).catch(console.error);
+      }
     }
   };
 
@@ -648,10 +672,12 @@ export default function Home() {
       focusTime: 0,
       createdAt: taskDate,
       tag: tagId,
-      subtasks: [], // Initialize empty subtasks array
-      subtasksExpanded: false, // Initialize expansion state
+      subtasks: [],
+      subtasksExpanded: false,
     };
     setDailyTasks({ ...dailyTasks, [dateString]: [...currentTasks, newTask] });
+    const supabase = getSupabase();
+    if (supabase) upsertTask(supabase, newTask, dateString).catch(console.error);
   };
 
   const addSubtask = (parentTaskId, title, tagId) => {
@@ -667,7 +693,7 @@ export default function Home() {
       createdAt: selectedDate,
       tag: tagId,
       parentTaskId,
-      subtasks: [], // Subtasks can't have their own subtasks
+      subtasks: [],
     };
 
     const updatedTasks = currentTasks.map((task) => {
@@ -676,13 +702,15 @@ export default function Home() {
         return {
           ...task,
           subtasks: [...currentSubtasks, newSubtask],
-          subtasksExpanded: true, // Auto-expand when adding subtask
+          subtasksExpanded: true,
         };
       }
       return task;
     });
 
     setDailyTasks({ ...dailyTasks, [dateString]: updatedTasks });
+    const supabase = getSupabase();
+    if (supabase) upsertTask(supabase, newSubtask, dateString).catch(console.error);
   };
 
   const handleAddSubtask = (parentTaskId) => {
@@ -711,10 +739,12 @@ export default function Home() {
   };
 
   const updateTask = (taskId, updates) => {
+    let updatedTask = null;
+    let newDateKey = null;
+    let oldDateKey = null;
+
     setDailyTasks((prev) => {
       const newDailyTasks = { ...prev };
-      let taskToMove = null;
-      let oldDateKey = null;
 
       Object.keys(newDailyTasks).forEach((dateKey) => {
         const taskIndex = newDailyTasks[dateKey].findIndex(
@@ -722,95 +752,92 @@ export default function Home() {
         );
         if (taskIndex !== -1) {
           oldDateKey = dateKey;
-          taskToMove = { ...newDailyTasks[dateKey][taskIndex], ...updates };
-
+          updatedTask = { ...newDailyTasks[dateKey][taskIndex], ...updates };
           newDailyTasks[dateKey].splice(taskIndex, 1);
-
           if (newDailyTasks[dateKey].length === 0) {
             delete newDailyTasks[dateKey];
           }
         }
       });
 
-      if (taskToMove) {
-        const newDateKey = getDateString(new Date(taskToMove.createdAt));
-
+      if (updatedTask) {
+        newDateKey = getDateString(new Date(updatedTask.createdAt));
         newDailyTasks[newDateKey] = [
           ...(newDailyTasks[newDateKey] || []),
-          taskToMove,
+          updatedTask,
         ];
       }
 
       return newDailyTasks;
     });
+
+    const supabase = getSupabase();
+    if (supabase && updatedTask && newDateKey) {
+      // 如果日期变了，软删旧行再 upsert 新行
+      if (oldDateKey && oldDateKey !== newDateKey) {
+        softDeleteTask(supabase, taskId).catch(console.error);
+      }
+      upsertTask(supabase, updatedTask, newDateKey).catch(console.error);
+    }
   };
 
   const deleteTask = (id) => {
     const dateString = getDateString(selectedDate);
     const currentTasks = getCurrentDayTasks();
+    const supabase = getSupabase();
 
-    // Check if it's a habit task
     if (id.startsWith("habit-")) {
       const habitId = id.split("-")[1];
-      const updatedHabits = habits.filter((habit) => habit.id !== habitId);
-      setHabits(updatedHabits);
+      setHabits(habits.filter((habit) => habit.id !== habitId));
+      if (supabase) softDeleteHabit(supabase, habitId).catch(console.error);
     } else {
-      // Regular task/subtask deletion
       const updatedTasks = removeTaskFromList(id, currentTasks);
       setDailyTasks({ ...dailyTasks, [dateString]: updatedTasks });
+      // softDeleteTask 会同时软删除所有子任务
+      if (supabase) softDeleteTask(supabase, id).catch(console.error);
     }
   };
 
   const updateTaskTime = (id, timeToAdd) => {
     const dateString = getDateString(selectedDate);
     const currentTasks = getCurrentDayTasks();
-    const updatedTasks = updateTaskInList(
-      id,
-      {
-        timeSpent: (findTaskById(id, currentTasks)?.timeSpent || 0) + timeToAdd,
-      },
-      currentTasks
-    );
+    const task = findTaskById(id, currentTasks);
+    const newTimeSpent = (task?.timeSpent || 0) + timeToAdd;
+    const updatedTasks = updateTaskInList(id, { timeSpent: newTimeSpent }, currentTasks);
     setDailyTasks({ ...dailyTasks, [dateString]: updatedTasks });
+    const supabase = getSupabase();
+    if (supabase && task) {
+      upsertTask(supabase, { ...task, timeSpent: newTimeSpent }, dateString).catch(console.error);
+    }
   };
 
   const transferTaskToCurrentDay = (taskId, originalDate, targetDate) => {
     const originalDateString = getDateString(originalDate);
     const targetDateString = getDateString(targetDate);
 
-    if (originalDateString === targetDateString) {
-      // Already on the target day, no transfer needed
-      return;
-    }
+    if (originalDateString === targetDateString) return;
+
+    let transferredTask = null;
 
     setDailyTasks((prevDailyTasks) => {
       const newDailyTasks = { ...prevDailyTasks };
-
-      // Find the task in its original day
       const originalDayTasks = newDailyTasks[originalDateString] || [];
       const taskToTransfer = findTaskById(taskId, originalDayTasks);
 
       if (!taskToTransfer) {
-        console.warn(
-          "Task not found for transfer:",
-          taskId,
-          originalDateString
-        );
-        return prevDailyTasks; // Task not found, return original state
+        console.warn("Task not found for transfer:", taskId, originalDateString);
+        return prevDailyTasks;
       }
 
-      // Remove task from original day
       const updatedOriginalTasks = removeTaskFromList(taskId, originalDayTasks);
       newDailyTasks[originalDateString] = updatedOriginalTasks;
 
-      // Update the task's properties for the new day
-      const updatedTask = {
+      transferredTask = {
         ...taskToTransfer,
-        createdAt: targetDate, // Set creation date to the actual current date
-        completed: false, // Reset completion status
-        timeSpent: 0, // Reset time spent
-        focusTime: 0, // Reset focus time
-        // Reset subtasks completion and time
+        createdAt: targetDate,
+        completed: false,
+        timeSpent: 0,
+        focusTime: 0,
         subtasks: (taskToTransfer.subtasks || []).map((subtask) => ({
           ...subtask,
           completed: false,
@@ -820,34 +847,69 @@ export default function Home() {
         })),
       };
 
-      // Add to the current day's tasks
       newDailyTasks[targetDateString] = [
         ...(newDailyTasks[targetDateString] || []),
-        updatedTask,
+        transferredTask,
       ];
 
-      // Clean up empty original day entry if no tasks left
       if (newDailyTasks[originalDateString]?.length === 0) {
         delete newDailyTasks[originalDateString];
       }
 
       return newDailyTasks;
     });
+
+    const supabase = getSupabase();
+    if (supabase && transferredTask) {
+      // 软删旧行，upsert 新行（含子任务）
+      softDeleteTask(supabase, taskId).catch(console.error);
+      upsertTask(supabase, transferredTask, targetDateString).catch(console.error);
+      (transferredTask.subtasks || []).forEach((st) => {
+        upsertTask(supabase, st, targetDateString).catch(console.error);
+      });
+    }
   };
 
   const updateTaskFocusTime = (id, focusTimeToAdd) => {
     const dateString = getDateString(selectedDate);
     const currentTasks = getCurrentDayTasks();
-    const updatedTasks = updateTaskInList(
-      id,
-      {
-        focusTime:
-          (findTaskById(id, currentTasks)?.focusTime || 0) + focusTimeToAdd,
-      },
-      currentTasks
-    );
+    const task = findTaskById(id, currentTasks);
+    const newFocusTime = (task?.focusTime || 0) + focusTimeToAdd;
+    const updatedTasks = updateTaskInList(id, { focusTime: newFocusTime }, currentTasks);
     setDailyTasks({ ...dailyTasks, [dateString]: updatedTasks });
+    const supabase = getSupabase();
+    if (supabase && task) {
+      upsertTask(supabase, { ...task, focusTime: newFocusTime }, dateString).catch(console.error);
+    }
   };
+
+  // 供 HabitTracker 使用：批量更新 habits 并同步到 Supabase
+  const updateHabits = useCallback((newHabitsOrUpdater) => {
+    setHabits((prev) => {
+      const next = typeof newHabitsOrUpdater === "function"
+        ? newHabitsOrUpdater(prev)
+        : newHabitsOrUpdater;
+      const supabase = getSupabase();
+      if (supabase) {
+        // 找出新增或变更的 habits（与 prev 对比）
+        const prevMap = {};
+        prev.forEach((h) => { prevMap[h.id] = h; });
+        next.forEach((h) => {
+          if (!prevMap[h.id] || JSON.stringify(prevMap[h.id]) !== JSON.stringify(h)) {
+            upsertHabit(supabase, h).catch(console.error);
+          }
+        });
+        // 找出被删除的 habits
+        const nextIds = new Set(next.map((h) => h.id));
+        prev.forEach((h) => {
+          if (!nextIds.has(h.id)) {
+            softDeleteHabit(supabase, h.id).catch(console.error);
+          }
+        });
+      }
+      return next;
+    });
+  }, [getSupabase]);
 
   const addCustomTag = (name, color) => {
     const newTag = {
@@ -856,6 +918,8 @@ export default function Home() {
       color,
     };
     setCustomTags([...customTags, newTag]);
+    const supabase = getSupabase();
+    if (supabase) upsertTag(supabase, newTag).catch(console.error);
     return newTag.id;
   };
 
@@ -942,13 +1006,21 @@ export default function Home() {
   };
 
   const updateCustomTag = (tagId, updates) => {
-    setCustomTags((prev) =>
-      prev.map((tag) => (tag.id === tagId ? { ...tag, ...updates } : tag))
-    );
+    setCustomTags((prev) => {
+      const updated = prev.map((tag) => (tag.id === tagId ? { ...tag, ...updates } : tag));
+      const supabase = getSupabase();
+      if (supabase) {
+        const updatedTag = updated.find((t) => t.id === tagId);
+        if (updatedTag) upsertTag(supabase, updatedTag).catch(console.error);
+      }
+      return updated;
+    });
   };
 
   const deleteCustomTag = (tagId) => {
     setCustomTags((prev) => prev.filter((tag) => tag.id !== tagId));
+    const supabase = getSupabase();
+    if (supabase) softDeleteTag(supabase, tagId).catch(console.error);
 
     const updatedDailyTasks = { ...dailyTasks };
     Object.keys(updatedDailyTasks).forEach((dateKey) => {
@@ -966,11 +1038,18 @@ export default function Home() {
     });
     setDailyTasks(updatedDailyTasks);
 
-    setHabits((prev) =>
-      prev.map((habit) =>
+    const supabaseForHabits = getSupabase();
+    setHabits((prev) => {
+      const updated = prev.map((habit) =>
         habit.tag === tagId ? { ...habit, tag: undefined } : habit
-      )
-    );
+      );
+      if (supabaseForHabits) {
+        updated
+          .filter((h) => h.tag === undefined && prev.find((p) => p.id === h.id)?.tag === tagId)
+          .forEach((h) => upsertHabit(supabaseForHabits, h).catch(console.error));
+      }
+      return updated;
+    });
   };
 
   const resetApp = () => {
@@ -982,6 +1061,84 @@ export default function Home() {
     setTheme("default");
     window.location.reload();
   };
+
+  // ─── 拉取远端任务并合并到本地 state ────────────────────────────────────────
+  const pullAndMergeDate = useCallback(async (supabase, dateStr) => {
+    const remoteTasks = await fetchTasksByDate(supabase, dateStr);
+    setDailyTasks((prev) => {
+      const local = prev[dateStr] || [];
+      // 以远端数据为准：按 id 覆盖本地，本地独有的保留
+      const remoteMap = {};
+      remoteTasks.forEach((t) => { remoteMap[t.id] = t; });
+      // 保留本地有但远端没有的（可能是刚创建还未同步完成的）
+      const localOnly = local.filter((t) => !remoteMap[t.id]);
+      return { ...prev, [dateStr]: [...remoteTasks, ...localOnly] };
+    });
+  }, []);
+
+  // 切换日期时懒加载该日期的任务（已拉取过的跳过）
+  useEffect(() => {
+    const supabase = getSupabase();
+    if (!supabase) return;
+    const dateStr = getDateString(selectedDate);
+    if (pulledDates.current.has(dateStr)) return;
+    pullAndMergeDate(supabase, dateStr)
+      .then(() => { pulledDates.current.add(dateStr); })
+      .catch((err) => console.error("Supabase pull date error:", err));
+  }, [selectedDate, getSupabase, pullAndMergeDate]);
+
+  const pullAndMergeMeta = useCallback(async (supabase) => {
+    const [remoteHabits, remoteTags] = await Promise.all([
+      fetchAllHabits(supabase),
+      fetchAllTags(supabase),
+    ]);
+    // 以远端为准，按 id 覆盖
+    setHabits((prev) => {
+      const remoteMap = {};
+      remoteHabits.forEach((h) => { remoteMap[h.id] = h; });
+      const localOnly = prev.filter((h) => !remoteMap[h.id]);
+      return [...remoteHabits, ...localOnly];
+    });
+    setCustomTags((prev) => {
+      const remoteMap = {};
+      remoteTags.forEach((t) => { remoteMap[t.id] = t; });
+      const localOnly = prev.filter((t) => !remoteMap[t.id]);
+      return [...remoteTags, ...localOnly];
+    });
+  }, []);
+
+  // ─── 页面加载时拉取 meta + 当天任务 ────────────────────────────────────────
+  useEffect(() => {
+    const supabase = getSupabase();
+    if (!supabase) return;
+
+    const todayStr = (() => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    })();
+
+    Promise.all([
+      pullAndMergeMeta(supabase),
+      pullAndMergeDate(supabase, todayStr),
+    ])
+      .then(() => { pulledDates.current.add(todayStr); })
+      .catch((err) => { console.error("Supabase pull on mount error:", err); });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ─── 定时拉取（每 5 分钟重新拉取当前日期 + meta） ──────────────────────────
+  useEffect(() => {
+    const config = getSupabaseConfig();
+    if (!config.enabled) return;
+    const interval = setInterval(() => {
+      const supabase = getSupabase();
+      if (!supabase) return;
+      const dateStr = getDateString(selectedDate);
+      Promise.all([pullAndMergeMeta(supabase), pullAndMergeDate(supabase, dateStr)])
+        .catch((err) => { console.error("Supabase periodic pull error:", err); });
+    }, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [selectedDate, getSupabase, pullAndMergeMeta, pullAndMergeDate]);
 
   const createFlatTaskList = (tasks) => {
     const flatList = [];
@@ -1017,12 +1174,17 @@ export default function Home() {
               transition={{ duration: 0.5 }}
               className="flex flex-col h-screen relative"
             >
-              <button
-                onClick={() => setShowSettings(true)}
-                className="absolute left-1/2 -translate-x-1/2 z-10 bg-primary text-background rounded-b-lg py-2 px-2 pt-1"
-              >
-                <Settings className="h-3 w-3" />
-              </button>
+              <div className="absolute left-1/2 -translate-x-1/2 z-10 flex items-center gap-1">
+                <button
+                  onClick={() => setShowSettings(true)}
+                  className="bg-primary text-background rounded-b-lg py-2 px-2 pt-1 flex items-center gap-1"
+                >
+                  <Settings className="h-3 w-3" />
+                  {getSupabaseConfig().enabled && (
+                    <Cloud className="h-3 w-3 text-green-300" />
+                  )}
+                </button>
+              </div>
 
               {/* Header Section */}
               <motion.div
@@ -1128,12 +1290,20 @@ export default function Home() {
                     </div>
                     Prio Space
                   </div>
-                  <button
-                    onClick={() => setShowSettings(true)}
-                    className="bg-primary text-background rounded-lg py-3 px-4 hover:bg-primary/90 transition-colors"
-                  >
-                    <Settings className="h-4 w-4" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {getSupabaseConfig().enabled && (
+                      <div className="flex items-center gap-1 text-[10px] font-extrabold text-green-600 dark:text-green-400">
+                        <Cloud className="h-3.5 w-3.5" />
+                        <span>云端</span>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => setShowSettings(true)}
+                      className="bg-primary text-background rounded-lg py-3 px-4 hover:bg-primary/90 transition-colors"
+                    >
+                      <Settings className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
 
                 {/* Date Header */}
@@ -1214,6 +1384,7 @@ export default function Home() {
                   <div>⌘/Ctrl + X → Settings</div>
                   <div>Esc → Close Modal</div>
                 </div>
+
               </motion.div>
             </div>
 
@@ -1323,7 +1494,7 @@ export default function Home() {
                 habits={habits}
                 customTags={customTags}
                 onClose={() => setShowHabits(false)}
-                onUpdateHabits={setHabits}
+                onUpdateHabits={updateHabits}
                 onAddCustomTag={addCustomTag}
               />
             )}
