@@ -49,6 +49,8 @@ export default function Home() {
   const [showWebRTCShare, setShowWebRTCShare] = useState(false);
   // 记录已从 Supabase 拉取过的日期，避免重复请求
   const pulledDates = useRef(new Set());
+  // 标记是否正在从远端拉取，避免 useEffect 回写
+  const isSyncingFromRemote = useRef(false);
 
   // 获取 Supabase 客户端（如果未启用返回 null）
   const getSupabase = useCallback(() => {
@@ -661,8 +663,6 @@ export default function Home() {
         return habit;
       });
       setHabits(updatedHabits);
-      const updatedHabit = updatedHabits.find((h) => h.id === task.habitId);
-      if (supabase && updatedHabit) upsertHabit(supabase, updatedHabit).catch(console.error);
     } else {
       const newCompleted = !task.completed;
       const updatedTasks = updateTaskInList(id, { completed: newCompleted }, currentTasks);
@@ -751,45 +751,80 @@ export default function Home() {
   };
 
   const updateTask = (taskId, updates) => {
-    let updatedTask = null;
-    let newDateKey = null;
-    let oldDateKey = null;
-
-    setDailyTasks((prev) => {
-      const newDailyTasks = { ...prev };
-
-      Object.keys(newDailyTasks).forEach((dateKey) => {
-        const taskIndex = newDailyTasks[dateKey].findIndex(
-          (t) => t.id === taskId
+    // 如果是 habit 生成的虚拟 task，更新对应 habit 的字段
+    const allTasks = [...getCurrentDayTasks(), ...generateDailyHabitTasks(habits, selectedDate)];
+    const targetTask = findTaskById(taskId, allTasks);
+    if (targetTask?.isHabit && targetTask.habitId) {
+      const habitUpdates = {};
+      if (updates.title !== undefined) habitUpdates.name = updates.title;
+      if (updates.tag !== undefined) habitUpdates.tag = updates.tag;
+      if (Object.keys(habitUpdates).length > 0) {
+        setHabits((prev) =>
+          prev.map((h) => h.id === targetTask.habitId ? { ...h, ...habitUpdates } : h)
         );
-        if (taskIndex !== -1) {
-          oldDateKey = dateKey;
-          updatedTask = { ...newDailyTasks[dateKey][taskIndex], ...updates };
-          newDailyTasks[dateKey].splice(taskIndex, 1);
-          if (newDailyTasks[dateKey].length === 0) {
-            delete newDailyTasks[dateKey];
+      }
+      return;
+    }
+
+    // 先从当前 state 找到 task（含 subtask），用于 Supabase 同步
+    let foundTask = null;
+    let foundDateKey = null;
+
+    Object.keys(dailyTasks).forEach((dateKey) => {
+      if (foundTask) return;
+      const t = findTaskById(taskId, dailyTasks[dateKey]);
+      if (t) {
+        foundTask = t;
+        foundDateKey = dateKey;
+      }
+    });
+
+    if (!foundTask) return;
+
+    const updatedTask = { ...foundTask, ...updates };
+    const newDateKey = getDateString(new Date(updatedTask.createdAt));
+    const isSubtask = !!foundTask.parentTaskId;
+
+    if (isSubtask) {
+      // subtask：用 updateTaskInList 更新嵌套结构
+      setDailyTasks((prev) => ({
+        ...prev,
+        [foundDateKey]: updateTaskInList(taskId, updates, prev[foundDateKey] || []),
+      }));
+    } else {
+      // 主任务：可能涉及日期变更
+      setDailyTasks((prev) => {
+        const newDailyTasks = {};
+        Object.keys(prev).forEach((dk) => {
+          newDailyTasks[dk] = [...prev[dk]];
+        });
+
+        // 从旧日期移除
+        if (newDailyTasks[foundDateKey]) {
+          newDailyTasks[foundDateKey] = newDailyTasks[foundDateKey].filter(
+            (t) => t.id !== taskId
+          );
+          if (newDailyTasks[foundDateKey].length === 0) {
+            delete newDailyTasks[foundDateKey];
           }
         }
-      });
 
-      if (updatedTask) {
-        newDateKey = getDateString(new Date(updatedTask.createdAt));
+        // 插入新日期
         newDailyTasks[newDateKey] = [
           ...(newDailyTasks[newDateKey] || []),
           updatedTask,
         ];
-      }
 
-      return newDailyTasks;
-    });
+        return newDailyTasks;
+      });
+    }
 
     const supabase = getSupabase();
-    if (supabase && updatedTask && newDateKey) {
-      // 如果日期变了，软删旧行再 upsert 新行
-      if (oldDateKey && oldDateKey !== newDateKey) {
+    if (supabase) {
+      if (!isSubtask && foundDateKey !== newDateKey) {
         softDeleteTask(supabase, taskId).catch(console.error);
       }
-      upsertTask(supabase, updatedTask, newDateKey).catch(console.error);
+      upsertTask(supabase, updatedTask, isSubtask ? foundDateKey : newDateKey).catch(console.error);
     }
   };
 
@@ -801,7 +836,6 @@ export default function Home() {
     if (id.startsWith("habit-")) {
       const habitId = id.split("-")[1];
       setHabits(habits.filter((habit) => habit.id !== habitId));
-      if (supabase) softDeleteHabit(supabase, habitId).catch(console.error);
     } else {
       const updatedTasks = removeTaskFromList(id, currentTasks);
       setDailyTasks({ ...dailyTasks, [dateString]: updatedTasks });
@@ -901,27 +935,37 @@ export default function Home() {
       const next = typeof newHabitsOrUpdater === "function"
         ? newHabitsOrUpdater(prev)
         : newHabitsOrUpdater;
-      const supabase = getSupabase();
-      if (supabase) {
-        // 找出新增或变更的 habits（与 prev 对比）
-        const prevMap = {};
-        prev.forEach((h) => { prevMap[h.id] = h; });
-        next.forEach((h) => {
-          if (!prevMap[h.id] || JSON.stringify(prevMap[h.id]) !== JSON.stringify(h)) {
-            upsertHabit(supabase, h).catch(console.error);
-          }
-        });
-        // 找出被删除的 habits
-        const nextIds = new Set(next.map((h) => h.id));
-        prev.forEach((h) => {
-          if (!nextIds.has(h.id)) {
-            softDeleteHabit(supabase, h.id).catch(console.error);
-          }
-        });
-      }
       return next;
     });
-  }, [getSupabase]);
+  }, []);
+
+  // 监听 habits 变化，同步到 Supabase
+  const prevHabitsRef = useRef(habits);
+  useEffect(() => {
+    const prev = prevHabitsRef.current;
+    prevHabitsRef.current = habits;
+    // 如果正在从远端拉取，跳过回写
+    if (isSyncingFromRemote.current) return;
+    const supabase = getSupabase();
+    if (!supabase) return;
+    // 跳过初始空数组（mount 时 habits 为 []）
+    if (prev.length === 0 && habits.length === 0) return;
+    // 找出新增或变更的 habits
+    const prevMap = {};
+    prev.forEach((h) => { prevMap[h.id] = h; });
+    habits.forEach((h) => {
+      if (!prevMap[h.id] || JSON.stringify(prevMap[h.id]) !== JSON.stringify(h)) {
+        upsertHabit(supabase, h).catch(console.error);
+      }
+    });
+    // 找出被删除的 habits
+    const nextIds = new Set(habits.map((h) => h.id));
+    prev.forEach((h) => {
+      if (!nextIds.has(h.id)) {
+        softDeleteHabit(supabase, h.id).catch(console.error);
+      }
+    });
+  }, [habits, getSupabase]);
 
   const addCustomTag = (name, color) => {
     const newTag = {
@@ -1018,15 +1062,14 @@ export default function Home() {
   };
 
   const updateCustomTag = (tagId, updates) => {
-    setCustomTags((prev) => {
-      const updated = prev.map((tag) => (tag.id === tagId ? { ...tag, ...updates } : tag));
-      const supabase = getSupabase();
-      if (supabase) {
-        const updatedTag = updated.find((t) => t.id === tagId);
-        if (updatedTag) upsertTag(supabase, updatedTag).catch(console.error);
-      }
-      return updated;
-    });
+    const updatedTag = customTags.find((t) => t.id === tagId);
+    if (!updatedTag) return;
+    const merged = { ...updatedTag, ...updates };
+    setCustomTags((prev) =>
+      prev.map((tag) => (tag.id === tagId ? { ...tag, ...updates } : tag))
+    );
+    const supabase = getSupabase();
+    if (supabase) upsertTag(supabase, merged).catch(console.error);
   };
 
   const deleteCustomTag = (tagId) => {
@@ -1050,18 +1093,11 @@ export default function Home() {
     });
     setDailyTasks(updatedDailyTasks);
 
-    const supabaseForHabits = getSupabase();
-    setHabits((prev) => {
-      const updated = prev.map((habit) =>
+    setHabits((prev) =>
+      prev.map((habit) =>
         habit.tag === tagId ? { ...habit, tag: undefined } : habit
-      );
-      if (supabaseForHabits) {
-        updated
-          .filter((h) => h.tag === undefined && prev.find((p) => p.id === h.id)?.tag === tagId)
-          .forEach((h) => upsertHabit(supabaseForHabits, h).catch(console.error));
-      }
-      return updated;
-    });
+      )
+    );
   };
 
   const resetApp = () => {
@@ -1104,6 +1140,8 @@ export default function Home() {
       fetchAllHabits(supabase),
       fetchAllTags(supabase),
     ]);
+    // 标记正在从远端同步，避免 useEffect 回写
+    isSyncingFromRemote.current = true;
     // 以远端为准，按 id 覆盖
     setHabits((prev) => {
       const remoteMap = {};
@@ -1117,6 +1155,8 @@ export default function Home() {
       const localOnly = prev.filter((t) => !remoteMap[t.id]);
       return [...remoteTags, ...localOnly];
     });
+    // 延迟重置标记，确保 useEffect 已跳过本次变更
+    requestAnimationFrame(() => { isSyncingFromRemote.current = false; });
   }, []);
 
   // ─── 页面加载时拉取 meta + 当天任务 ────────────────────────────────────────
