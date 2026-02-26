@@ -821,9 +821,6 @@ export default function Home() {
 
     const supabase = getSupabase();
     if (supabase) {
-      if (!isSubtask && foundDateKey !== newDateKey) {
-        softDeleteTask(supabase, taskId).catch(console.error);
-      }
       upsertTask(supabase, updatedTask, isSubtask ? foundDateKey : newDateKey).catch(console.error);
     }
   };
@@ -881,14 +878,8 @@ export default function Home() {
       transferredTask = {
         ...taskToTransfer,
         createdAt: targetDate,
-        completed: false,
-        timeSpent: 0,
-        focusTime: 0,
         subtasks: (taskToTransfer.subtasks || []).map((subtask) => ({
           ...subtask,
-          completed: false,
-          timeSpent: 0,
-          focusTime: 0,
           createdAt: targetDate,
         })),
       };
@@ -907,12 +898,7 @@ export default function Home() {
 
     const supabase = getSupabase();
     if (supabase && transferredTask) {
-      // 软删旧行，upsert 新行（含子任务）
-      softDeleteTask(supabase, taskId).catch(console.error);
       upsertTask(supabase, transferredTask, targetDateString).catch(console.error);
-      (transferredTask.subtasks || []).forEach((st) => {
-        upsertTask(supabase, st, targetDateString).catch(console.error);
-      });
     }
   };
 
