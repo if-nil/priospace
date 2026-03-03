@@ -96,8 +96,13 @@ export function TaskList({
   };
 
   const formatTime = (minutes) => {
-    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(minutes / 1440); // 1440 = 24 * 60
+    const hours = Math.floor((minutes % 1440) / 60);
     const mins = minutes % 60;
+
+    if (days > 0) {
+      return hours > 0 ? `${days}d ${hours}h ${mins}m` : `${days}d ${mins}m`;
+    }
     if (hours > 0) {
       return `${hours}h ${mins}m`;
     }
